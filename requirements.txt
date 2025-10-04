@@ -1,9 +1,27 @@
-fastapi
-uvicorn
+# Core web stack
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+python-dotenv==1.0.1
+
+# AI and embeddings
+sentence-transformers==2.2.2
+huggingface_hub==0.19.4
+torch==2.2.2+cpu
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# Token counting
+tiktoken==0.7.0
+
+# File parsing
+pypdf==4.3.1
+
+# RAG and LLM
+groq==0.11.0
+requests==2.32.3
+
+# FAISS for vector store
 faiss-cpu
-sentence-transformers
-transformers
-torch
-groq
-pypdf
-python-dotenv
+
+# Optional but helpful
+scikit-learn
