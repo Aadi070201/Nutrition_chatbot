@@ -1,73 +1,75 @@
 import os
-from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from models import ChatRequest, ChatResponse, SourceChunk, IngestResponse
+from models import ChatRequest, ChatResponse, SourceChunk, IngestResponse, DebugIndex
 from rag import RAGPipeline
 from settings import settings
 
 app = FastAPI(title="LongevAI RAG Backend", version="0.1.0")
 
-# CORS (tighten to your frontend later)
+# Wide-open CORS for quick testing (tighten later if needed)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # replace with your frontend URL when ready
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Simple API-key guard (optional but recommended)
-def require_api_key(x_api_key: str = Header(default="")):
-    expected = settings.BACKEND_API_KEY
-    if not expected:
-        # no key set -> allow (dev)
-        return True
-    if x_api_key == expected:
-        return True
-    raise HTTPException(status_code=401, detail="Invalid or missing API key.")
-
+# ---- create pipeline once ----
 pipeline = RAGPipeline()
 
-@app.on_event("startup")
-def _startup():
-    index_dir = pipeline.index_dir
-    data_dir = os.path.join(os.path.dirname(__file__), "data")
-    index_path = os.path.join(index_dir, "index.faiss")
-    meta_path  = os.path.join(index_dir, "meta.jsonl")
-
-    has_index = os.path.exists(index_path) and os.path.exists(meta_path)
-    if has_index:
-        ok = pipeline.vs.load()
-        print(f"[startup] loaded index: ok={ok} chunks={len(pipeline.vs.id2meta)} dir={index_dir}")
-    else:
-        print(f"[startup] no index found -> ingesting from {data_dir} ...")
-        os.makedirs(index_dir, exist_ok=True)
-        chunks, docs = pipeline.ingest_paths([data_dir])
-        print(f"[startup] ingest complete: docs={docs}, chunks={chunks}")
 
 @app.get("/health")
 def health():
-    return {"ok": True, **pipeline.index_stats()}
+    return {"ok": True}
 
-@app.post("/ingest", response_model=IngestResponse, dependencies=[Depends(require_api_key)])
+
+@app.get("/debug/index", response_model=DebugIndex)
+def debug_index():
+    idx_dir = pipeline.index_dir
+    index_path = os.path.join(idx_dir, "index.faiss")
+    meta_path = os.path.join(idx_dir, "meta.jsonl")
+    index_exists = os.path.exists(index_path)
+    meta_exists = os.path.exists(meta_path)
+    index_size = os.path.getsize(index_path) if index_exists else 0
+    meta_size = os.path.getsize(meta_path) if meta_exists else 0
+    chunks = len(pipeline.vs.id2meta) if pipeline.vs and pipeline.vs.id2meta else 0
+    return DebugIndex(
+        ok=True,
+        index_dir=idx_dir,
+        faiss_loaded=pipeline.vs.index is not None,
+        chunks=chunks,
+        index_exists=index_exists,
+        meta_exists=meta_exists,
+        index_size=index_size,
+        meta_size=meta_size,
+    )
+
+
+@app.post("/ingest", response_model=IngestResponse)
 def ingest():
+    """
+    (Optional) Ingest the repo's /data folder on demand.
+    On Render we already ingest during the build step via `python ingest.py`.
+    Calling this again will add new files, if any.
+    """
     data_dir = os.path.join(os.path.dirname(__file__), "data")
     chunks, docs = pipeline.ingest_paths([data_dir])
-    if chunks == 0:
-        raise HTTPException(status_code=400, detail="No ingestible documents found under backend/data")
+    if chunks == 0 and docs == 0:
+        # no new chunks; but it's not an error — just report it clearly
+        return IngestResponse(ok=True, chunks_indexed=0, docs=0, note="No new ingestible documents found.")
     return IngestResponse(ok=True, chunks_indexed=chunks, docs=docs)
 
-@app.post("/chat", response_model=ChatResponse, dependencies=[Depends(require_api_key)])
+
+@app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
     if pipeline.vs.index is None or len(pipeline.vs.id2meta) == 0:
-        raise HTTPException(status_code=400, detail="Index is empty. Ingest documents first.")
-    try:
-        answer, citations, scored = pipeline.chat(req.query, k=req.k)
-    except Exception as e:
-        # surface the error instead of 502
-        raise HTTPException(status_code=500, detail=f"chat_failed: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=400, detail="Index is empty. Please ingest documents first.")
+    answer, citations, scored = pipeline.chat(req.query, k=req.k)
     score_map = {i: s for i, s in scored}
+
     sources = [
         SourceChunk(
             id=c["id"],
