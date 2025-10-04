@@ -1,14 +1,14 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()  # load .env if present (Render also injects env vars)
+load_dotenv()
 
 class Settings:
     # Embeddings
     EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "local")
     LOCAL_EMBEDDING_MODEL = os.getenv(
         "LOCAL_EMBEDDING_MODEL",
-        "sentence-transformers/all-MiniLM-L6-v2"  # 384-dim
+        "sentence-transformers/all-MiniLM-L6-v2",  # small & fast
     )
 
     # Generation (Groq)
@@ -16,19 +16,16 @@ class Settings:
     GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
     GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
-    # Reranker
-    RERANK_PROVIDER = os.getenv("RERANK_PROVIDER", "local")  # "local" or "none"
-    LOCAL_RERANK_MODEL = os.getenv(
-        "LOCAL_RERANK_MODEL",
-        "cross-encoder/ms-marco-MiniLM-L-6-v2"
-    )
+    # Reranker (disable on free plan)
+    RERANK_PROVIDER = os.getenv("RERANK_PROVIDER", "none")  # "none" or "local"
+    LOCAL_RERANK_MODEL = os.getenv("LOCAL_RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 
-    # Index / Chunking
-    BASE_DIR = os.path.dirname(__file__)
-    # Make INDEX_DIR absolute so it always resolves on Render
-    INDEX_DIR = os.path.join(BASE_DIR, "store")
+    # Index/Chunking
+    INDEX_DIR = os.getenv("INDEX_DIR", "store")
     CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "450"))
     CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "50"))
 
-settings = Settings()
+    # Optional: simple header auth for /chat and /ingest
+    BACKEND_API_KEY = os.getenv("BACKEND_API_KEY", "")
 
+settings = Settings()
