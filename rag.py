@@ -9,15 +9,15 @@ from pypdf import PdfReader
 
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from groq import Groq
-from groq import APIConnectionError, APIStatusError  # clearer errors
+from groq import APIConnectionError, APIStatusError
 
 from settings import settings
 
-# ---------- config toggles ----------
-EXCLUDE_FILENAMES = {"index.md", "glossary.md", "sources.md"}  # never retrieve these
+# ---------- config ----------
+EXCLUDE_FILENAMES = {"index.md", "glossary.md", "sources.md"}
 DEFAULT_TOPN = 20
 DEFAULT_K = 6
-MMR_LAMBDA = 0.65  # 1.0 = only relevance, 0.0 = only diversity
+MMR_LAMBDA = 0.65
 TIKTOKEN_ENCODING = "cl100k_base"
 
 SMALLTALK = {
@@ -51,14 +51,15 @@ def chunk_text(text: str, chunk_size: int, overlap: int, encoding_name: str = TI
     while start < len(toks):
         end = start + chunk_size
         chunks.append(enc.decode(toks[start:end]))
-        if end >= len(toks): break
+        if end >= len(toks):
+            break
         start = max(0, end - overlap)
     return chunks
 
-# ---------- data classes ----------
+# ---------- data ----------
 @dataclass
 class Meta:
-    doc_id: str     # filename
+    doc_id: str     # filename only
     source: str     # full path
     text: str       # chunk text
 
@@ -94,7 +95,7 @@ class VectorStore:
                 f.write(json.dumps(m.__dict__) + "\n")
 
     def create(self, vectors: np.ndarray, metas: List[Meta]):
-        self.index = faiss.IndexFlatIP(self.dim)   # cosine if vectors are normalized
+        self.index = faiss.IndexFlatIP(self.dim)   # cosine if vectors normalized
         self.index.add(vectors.astype("float32"))
         self.id2meta = metas
 
@@ -109,24 +110,24 @@ class VectorStore:
         if self.index is None or len(self.id2meta) == 0:
             return []
         sims, ids = self.index.search(query_vec.astype("float32"), top_n)
-        results = []
+        out = []
         for i, score in zip(ids[0].tolist(), sims[0].tolist()):
             if i == -1:
                 continue
-            results.append((i, float(score)))
-        return results
+            out.append((i, float(score)))
+        return out
 
 # ---------- pipeline ----------
 class RAGPipeline:
     def __init__(self):
-        # embeddings
+        # Embeddings
         self.embedder = SentenceTransformer(settings.LOCAL_EMBEDDING_MODEL, device="cpu")
         self.dim = self.embedder.get_sentence_embedding_dimension()
 
-        # reranker (lazy-load to save RAM on free tier)
+        # Reranker (lazy-load to save RAM on free tier)
         self.rerank_provider = settings.RERANK_PROVIDER.lower()
         self._cross_encoder_name = settings.LOCAL_RERANK_MODEL
-        self.cross_encoder = None  # loaded on first use if provider == "local"
+        self.cross_encoder = None  # loaded when needed if provider == "local"
 
         # Groq generation
         if settings.GENERATION_PROVIDER.lower() != "groq":
@@ -136,29 +137,34 @@ class RAGPipeline:
         self.groq = Groq(api_key=settings.GROQ_API_KEY)
         self.generative_model = settings.GROQ_MODEL
 
-        # chunking / index (absolute path so Render can't miss /store)
+        # Index path (absolute so Render can’t miss /store)
         base_dir = os.path.dirname(__file__)
         idx_dir = settings.INDEX_DIR
         self.index_dir = idx_dir if os.path.isabs(idx_dir) else os.path.join(base_dir, idx_dir)
 
+        # Chunking
         self.chunk_size = settings.CHUNK_SIZE
         self.chunk_overlap = settings.CHUNK_OVERLAP
 
+        # Vector store
         self.vs = VectorStore(dim=self.dim, index_dir=self.index_dir)
         if not self.vs.load():
-            # If there's no serialized index, ensure the dir exists (ingest could create it later)
             os.makedirs(self.index_dir, exist_ok=True)
 
     # ----- embeddings -----
     def embed_texts(self, texts: List[str]) -> np.ndarray:
         embs = self.embedder.encode(
-            texts, batch_size=64, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False
+            texts,
+            batch_size=64,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+            show_progress_bar=False,
         ).astype("float32")
         return embs
 
-    # ----- ingest -----
+    # ----- ingestion -----
     def ingest_paths(self, paths: List[str]) -> Tuple[int, int]:
-        all_chunks = []
+        all_chunks: List[str] = []
         metas: List[Meta] = []
         docs = 0
 
@@ -212,7 +218,7 @@ class RAGPipeline:
         qvec = self.embed_texts([query])
         raw = self.vs.search(qvec, top_n=top_n)
 
-        # drop excluded filenames from results
+        # Drop excluded filenames
         filtered = []
         for idx, score in raw:
             fname = os.path.basename(self.vs.id2meta[idx].source).lower()
@@ -225,14 +231,11 @@ class RAGPipeline:
     def _mmr(self, query: str, candidates: List[Tuple[int, float]], k: int) -> List[Tuple[int, float]]:
         if not candidates:
             return []
-        # build doc matrix
         docs = [self.vs.id2meta[i].text for i, _ in candidates]
         doc_embs = self.embed_texts(docs)  # normalized
-        q_emb = self.embed_texts([query])[0:1]  # (1, d)
+        q_emb = self.embed_texts([query])[0:1]
 
-        # relevance = cosine with query
-        rel = (doc_embs @ q_emb.T).ravel()  # (n,)
-
+        rel = (doc_embs @ q_emb.T).ravel()
         selected, selected_idx = [], set()
         while len(selected) < min(k, len(candidates)):
             if not selected:
@@ -240,23 +243,19 @@ class RAGPipeline:
                 selected.append((candidates[j][0], float(rel[j])))
                 selected_idx.add(j)
                 continue
-            # diversity = max similarity to already selected
             selected_embs = doc_embs[list(selected_idx)]
-            sim_to_sel = selected_embs @ doc_embs.T  # (s, n)
-            max_sim = sim_to_sel.max(axis=0)  # (n,)
-
-            # MMR score
+            sim_to_sel = selected_embs @ doc_embs.T
+            max_sim = sim_to_sel.max(axis=0)
             mmr_score = MMR_LAMBDA * rel - (1 - MMR_LAMBDA) * max_sim
-            mmr_score[list(selected_idx)] = -1e9  # mask already chosen
+            mmr_score[list(selected_idx)] = -1e9
             j = int(np.argmax(mmr_score))
             selected.append((candidates[j][0], float(rel[j])))
             selected_idx.add(j)
         return selected
 
-    # ----- rerank ----------
+    # ----- rerank -----
     def _get_cross_encoder(self):
         if (self.cross_encoder is None) and (self.rerank_provider == "local"):
-            # Lazy load to reduce memory footprint on free hosting
             self.cross_encoder = CrossEncoder(self._cross_encoder_name, device="cpu")
         return self.cross_encoder
 
@@ -265,9 +264,7 @@ class RAGPipeline:
             return []
         ce = self._get_cross_encoder()
         if ce is None:
-            # Use MMR for relevance + diversity
             return self._mmr(query, candidates, k=k)
-        # Cross-encoder path
         docs = [self.vs.id2meta[i].text for i, _ in candidates]
         pairs = [(query, d) for d in docs]
         scores = ce.predict(pairs, show_progress_bar=False).tolist()
@@ -294,7 +291,6 @@ class RAGPipeline:
             raise RuntimeError(f"Groq API error: {e}")
 
     def generate(self, query: str, selected_ids: List[int]) -> Tuple[str, List[Dict]]:
-        # Build context WITHOUT exposing internal filenames
         context_blocks, citations = [], []
         for rank, idx in enumerate(selected_ids, start=1):
             meta = self.vs.id2meta[idx]
@@ -320,12 +316,10 @@ class RAGPipeline:
 
     # ----- end-to-end chat -----
     def chat(self, query: str, k: int = DEFAULT_K) -> Tuple[str, List[Dict], List[Tuple[int, float]]]:
-        # Small-talk quick reply
         t = query.strip().lower()
         if t in SMALLTALK:
             return SMALLTALK[t], [], []
 
-        # if index is not loaded, avoid crashes and reply helpfully
         if (self.vs.index is None) or (len(self.vs.id2meta) == 0):
             fallback = (
                 "I can’t see any knowledge base loaded yet. "
