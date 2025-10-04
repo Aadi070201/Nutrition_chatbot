@@ -9,6 +9,7 @@ from pypdf import PdfReader
 
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from groq import Groq
+from groq import APIConnectionError, APIStatusError  # for clearer errors
 
 from settings import settings
 
@@ -17,6 +18,7 @@ EXCLUDE_FILENAMES = {"index.md", "glossary.md", "sources.md"}  # never retrieve 
 DEFAULT_TOPN = 20
 DEFAULT_K = 6
 MMR_LAMBDA = 0.65  # 1.0 = only relevance, 0.0 = only diversity
+TIKTOKEN_ENCODING = "cl100k_base"
 
 SMALLTALK = {
     "hi": "Hey! I’m Aadi. Ask me anything about nutrition—foods, macros, vitamins, diets, hydration.",
@@ -42,7 +44,7 @@ def read_file(path: str) -> str:
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         return f.read()
 
-def chunk_text(text: str, chunk_size: int, overlap: int, encoding_name: str = "cl100k_base") -> List[str]:
+def chunk_text(text: str, chunk_size: int, overlap: int, encoding_name: str = TIKTOKEN_ENCODING) -> List[str]:
     enc = tiktoken.get_encoding(encoding_name)
     toks = enc.encode(text)
     chunks, start = [], 0
@@ -77,9 +79,12 @@ class VectorStore:
         metas = []
         with open(self.meta_path, "r", encoding="utf-8") as f:
             for line in f:
+                line = line.strip()
+                if not line:
+                    continue
                 metas.append(Meta(**json.loads(line)))
         self.id2meta = metas
-        return True
+        return (self.index is not None) and (len(self.id2meta) > 0)
 
     def save(self):
         os.makedirs(self.index_dir, exist_ok=True)
@@ -101,6 +106,8 @@ class VectorStore:
             self.id2meta.extend(metas)
 
     def search(self, query_vec: np.ndarray, top_n: int = DEFAULT_TOPN) -> List[Tuple[int, float]]:
+        if self.index is None or len(self.id2meta) == 0:
+            return []
         sims, ids = self.index.search(query_vec.astype("float32"), top_n)
         results = []
         for i, score in zip(ids[0].tolist(), sims[0].tolist()):
@@ -116,27 +123,31 @@ class RAGPipeline:
         self.embedder = SentenceTransformer(settings.LOCAL_EMBEDDING_MODEL, device="cpu")
         self.dim = self.embedder.get_sentence_embedding_dimension()
 
-        # reranker (optional)
+        # reranker (lazy; saves memory on free plans)
         self.rerank_provider = settings.RERANK_PROVIDER.lower()
-        self.cross_encoder = None
-        if self.rerank_provider == "local":
-            self.cross_encoder = CrossEncoder(settings.LOCAL_RERANK_MODEL, device="cpu")
+        self._cross_encoder_name = settings.LOCAL_RERANK_MODEL
+        self.cross_encoder = None  # loaded on first use if provider == "local"
 
         # Groq generation
         if settings.GENERATION_PROVIDER.lower() != "groq":
             raise RuntimeError("GENERATION_PROVIDER must be 'groq' for this setup.")
         if not settings.GROQ_API_KEY:
-            raise RuntimeError("GROQ_API_KEY missing in .env")
+            raise RuntimeError("GROQ_API_KEY missing in environment")
         self.groq = Groq(api_key=settings.GROQ_API_KEY)
         self.generative_model = settings.GROQ_MODEL
 
         # chunking / index
-        self.index_dir = settings.INDEX_DIR
+        # Make INDEX_DIR absolute so Render can't miss /store
+        base_dir = os.path.dirname(__file__)
+        idx_dir = settings.INDEX_DIR
+        self.index_dir = idx_dir if os.path.isabs(idx_dir) else os.path.join(base_dir, idx_dir)
+
         self.chunk_size = settings.CHUNK_SIZE
         self.chunk_overlap = settings.CHUNK_OVERLAP
 
         self.vs = VectorStore(dim=self.dim, index_dir=self.index_dir)
         if not self.vs.load():
+            # If there's no serialized index, ensure the dir exists (ingest could create it later)
             os.makedirs(self.index_dir, exist_ok=True)
 
     # ----- embeddings -----
@@ -167,6 +178,8 @@ class RAGPipeline:
                             continue
                         text = read_file(full)
                         chunks = chunk_text(text, self.chunk_size, self.chunk_overlap)
+                        if not chunks:
+                            continue
                         all_chunks.extend(chunks)
                         metas.extend([Meta(doc_id=os.path.basename(full), source=full, text=c) for c in chunks])
                         docs += 1
@@ -175,6 +188,8 @@ class RAGPipeline:
                     continue
                 text = read_file(p)
                 chunks = chunk_text(text, self.chunk_size, self.chunk_overlap)
+                if not chunks:
+                    continue
                 all_chunks.extend(chunks)
                 metas.extend([Meta(doc_id=os.path.basename(p), source=p, text=c) for c in chunks])
                 docs += 1
@@ -193,6 +208,8 @@ class RAGPipeline:
 
     # ----- retrieve -----
     def retrieve(self, query: str, top_n: int = DEFAULT_TOPN) -> List[Tuple[int, float]]:
+        if self.vs.index is None or len(self.vs.id2meta) == 0:
+            return []
         qvec = self.embed_texts([query])
         raw = self.vs.search(qvec, top_n=top_n)
 
@@ -238,16 +255,23 @@ class RAGPipeline:
         return selected
 
     # ----- rerank ----------
+    def _get_cross_encoder(self):
+        if (self.cross_encoder is None) and (self.rerank_provider == "local"):
+            # Lazy load to reduce memory footprint on free hosting
+            self.cross_encoder = CrossEncoder(self._cross_encoder_name, device="cpu")
+        return self.cross_encoder
+
     def rerank(self, query: str, candidates: List[Tuple[int, float]], k: int) -> List[Tuple[int, float]]:
         if not candidates:
             return []
-        if self.cross_encoder is None:
+        ce = self._get_cross_encoder()
+        if ce is None:
             # Use MMR for relevance + diversity
             return self._mmr(query, candidates, k=k)
         # Cross-encoder path
         docs = [self.vs.id2meta[i].text for i, _ in candidates]
         pairs = [(query, d) for d in docs]
-        scores = self.cross_encoder.predict(pairs, show_progress_bar=False).tolist()
+        scores = ce.predict(pairs, show_progress_bar=False).tolist()
         ranked = sorted(list(enumerate(scores)), key=lambda x: x[1], reverse=True)[:k]
         final = []
         for pos, sc in ranked:
@@ -257,15 +281,18 @@ class RAGPipeline:
 
     # ----- Groq LLM -----
     def _groq_generate(self, system_prompt: str, user_prompt: str) -> str:
-        resp = self.groq.chat.completions.create(
-            model=self.generative_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.2,
-        )
-        return resp.choices[0].message.content
+        try:
+            resp = self.groq.chat.completions.create(
+                model=self.generative_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.2,
+            )
+            return resp.choices[0].message.content
+        except (APIStatusError, APIConnectionError) as e:
+            raise RuntimeError(f"Groq API error: {e}")
 
     def generate(self, query: str, selected_ids: List[int]) -> Tuple[str, List[Dict]]:
         # Build context WITHOUT exposing internal filenames
@@ -298,6 +325,15 @@ class RAGPipeline:
         t = query.strip().lower()
         if t in SMALLTALK:
             return SMALLTALK[t], [], []
+
+        # if index is not loaded, avoid crashes and reply helpfully
+        if (self.vs.index is None) or (len(self.vs.id2meta) == 0):
+            fallback = (
+                "I can’t see any knowledge base loaded yet. "
+                "If you committed a prebuilt index, make sure INDEX_DIR points to it (e.g., 'store'). "
+                "Otherwise run ingestion first."
+            )
+            return fallback, [], []
 
         candidates = self.retrieve(query, top_n=DEFAULT_TOPN)
         topk = self.rerank(query, candidates, k=k)
