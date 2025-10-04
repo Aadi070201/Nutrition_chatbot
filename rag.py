@@ -3,7 +3,6 @@ from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 
 from models import ChatRequest, ChatResponse, SourceChunk, IngestResponse
-from rag import RAGPipeline
 from settings import settings
 
 app = FastAPI(title="LongevAI RAG Backend", version="0.1.0")
@@ -79,3 +78,4 @@ def chat(req: ChatRequest):
         for c in citations
     ]
     return ChatResponse(answer=answer, sources=sources)
+
