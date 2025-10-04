@@ -9,7 +9,7 @@ from pypdf import PdfReader
 
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from groq import Groq
-from groq import APIConnectionError, APIStatusError  # for clearer errors
+from groq import APIConnectionError, APIStatusError  # clearer errors
 
 from settings import settings
 
@@ -123,7 +123,7 @@ class RAGPipeline:
         self.embedder = SentenceTransformer(settings.LOCAL_EMBEDDING_MODEL, device="cpu")
         self.dim = self.embedder.get_sentence_embedding_dimension()
 
-        # reranker (lazy; saves memory on free plans)
+        # reranker (lazy-load to save RAM on free tier)
         self.rerank_provider = settings.RERANK_PROVIDER.lower()
         self._cross_encoder_name = settings.LOCAL_RERANK_MODEL
         self.cross_encoder = None  # loaded on first use if provider == "local"
@@ -136,8 +136,7 @@ class RAGPipeline:
         self.groq = Groq(api_key=settings.GROQ_API_KEY)
         self.generative_model = settings.GROQ_MODEL
 
-        # chunking / index
-        # Make INDEX_DIR absolute so Render can't miss /store
+        # chunking / index (absolute path so Render can't miss /store)
         base_dir = os.path.dirname(__file__)
         idx_dir = settings.INDEX_DIR
         self.index_dir = idx_dir if os.path.isabs(idx_dir) else os.path.join(base_dir, idx_dir)
