@@ -26,8 +26,9 @@ class Settings:
     # Index / Chunking
     BASE_DIR = os.path.dirname(__file__)
     # Make INDEX_DIR absolute so it always resolves on Render
-    INDEX_DIR = os.getenv("INDEX_DIR", os.path.join(BASE_DIR, "store"))
+    INDEX_DIR = os.path.join(BASE_DIR, "store")
     CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "450"))
     CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "50"))
 
 settings = Settings()
+
