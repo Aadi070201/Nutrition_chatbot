@@ -18,8 +18,10 @@ class Settings:
     LOCAL_RERANK_MODEL = os.getenv("LOCAL_RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 
     # Index/Chunking
-    INDEX_DIR = os.getenv("INDEX_DIR", "store")
+    BASE_DIR = os.path.dirname(__file__)
+    INDEX_DIR = os.getenv("INDEX_DIR", os.path.join(BASE_DIR, "store"))
     CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "450"))
     CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "50"))
 
 settings = Settings()
+
